@@ -61,7 +61,7 @@ func Unmarshal(input []byte) (BitArray, error) {
 }
 
 // Serialize converts the sparseBitArray to a byte slice
-func (ba *sparseBitArray) Serialize() ([]byte, error) {
+func (sba *sparseBitArray) Serialize() ([]byte, error) {
 	w := new(bytes.Buffer)
 
 	var identifier uint8 = 'S'
@@ -70,15 +70,15 @@ func (ba *sparseBitArray) Serialize() ([]byte, error) {
 		return nil, err
 	}
 
-	blocksLen := uint64(len(ba.blocks))
-	indexLen := uint64(len(ba.indices))
+	blocksLen := uint64(len(sba.blocks))
+	indexLen := uint64(len(sba.indices))
 
 	err = binary.Write(w, binary.LittleEndian, blocksLen)
 	if err != nil {
 		return nil, err
 	}
 
-	err = binary.Write(w, binary.LittleEndian, ba.blocks)
+	err = binary.Write(w, binary.LittleEndian, sba.blocks)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +88,7 @@ func (ba *sparseBitArray) Serialize() ([]byte, error) {
 		return nil, err
 	}
 
-	err = binary.Write(w, binary.LittleEndian, ba.indices)
+	err = binary.Write(w, binary.LittleEndian, sba.indices)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +114,7 @@ func Uint64FromBytes(b []byte) (uint64, int) {
 // specified when creating the sparseBitArray. Also note that if an error
 // is returned, the sparseBitArray this is called on might be populated
 // with partial data.
-func (ret *sparseBitArray) Deserialize(incoming []byte) error {
+func (sba *sparseBitArray) Deserialize(incoming []byte) error {
 	var intsize = uint64(s / 8)
 	var curLoc = uint64(1) // Ignore the identifier byte
 
@@ -127,13 +127,13 @@ func (ret *sparseBitArray) Deserialize(incoming []byte) error {
 	curLoc += intsize
 
 	var nextblock uint64
-	ret.blocks = make([]block, intsToRead)
+	sba.blocks = make([]block, intsToRead)
 	for i := uint64(0); i < intsToRead; i++ {
 		nextblock, bytesRead = Uint64FromBytes(incoming[curLoc : curLoc+intsize])
 		if bytesRead < 0 {
 			return errors.New("Invalid data for BitArray")
 		}
-		ret.blocks[i] = block(nextblock)
+		sba.blocks[i] = block(nextblock)
 		curLoc += intsize
 	}
 
@@ -144,13 +144,13 @@ func (ret *sparseBitArray) Deserialize(incoming []byte) error {
 	curLoc += intsize
 
 	var nextuint uint64
-	ret.indices = make(uintSlice, intsToRead)
+	sba.indices = make(uintSlice, intsToRead)
 	for i := uint64(0); i < intsToRead; i++ {
 		nextuint, bytesRead = Uint64FromBytes(incoming[curLoc : curLoc+intsize])
 		if bytesRead < 0 {
 			return errors.New("Invalid data for BitArray")
 		}
-		ret.indices[i] = nextuint
+		sba.indices[i] = nextuint
 		curLoc += intsize
 	}
 	return nil
@@ -197,15 +197,15 @@ func (ba *bitArray) Serialize() ([]byte, error) {
 // with data in the bytes. Note that this will overwrite any capacity
 // specified when creating the bitArray. Also note that if an error is returned,
 // the bitArray this is called on might be populated with partial data.
-func (ret *bitArray) Deserialize(incoming []byte) error {
+func (ba *bitArray) Deserialize(incoming []byte) error {
 	r := bytes.NewReader(incoming[1:]) // Discard identifier
 
-	err := binary.Read(r, binary.LittleEndian, &ret.lowest)
+	err := binary.Read(r, binary.LittleEndian, &ba.lowest)
 	if err != nil {
 		return err
 	}
 
-	err = binary.Read(r, binary.LittleEndian, &ret.highest)
+	err = binary.Read(r, binary.LittleEndian, &ba.highest)
 	if err != nil {
 		return err
 	}
@@ -218,13 +218,13 @@ func (ret *bitArray) Deserialize(incoming []byte) error {
 
 	// anyset defaults to false so we don't need an else statement
 	if encodedanyset == 1 {
-		ret.anyset = true
+		ba.anyset = true
 	}
 
 	var nextblock block
 	err = binary.Read(r, binary.LittleEndian, &nextblock)
 	for err == nil {
-		ret.blocks = append(ret.blocks, nextblock)
+		ba.blocks = append(ba.blocks, nextblock)
 		err = binary.Read(r, binary.LittleEndian, &nextblock)
 	}
 	if err != io.EOF {

@@ -19,7 +19,7 @@ package skip
 import (
 	"github.com/stretchr/testify/mock"
 
-	"github.com/Workiva/go-datastructures/common"
+	"github.com/blastbao/go-datastructures/common"
 )
 
 type mockEntry uint64

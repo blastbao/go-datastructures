@@ -51,9 +51,9 @@ type nodes []node
 // with some minor additions.
 type RingBuffer struct {
 	_padding0      [8]uint64
-	queue          uint64
+	tail           uint64 		// 队尾指针
 	_padding1      [8]uint64
-	dequeue        uint64
+	head           uint64 		// 队头指针
 	_padding2      [8]uint64
 	mask, disposed uint64
 	_padding3      [8]uint64
@@ -69,41 +69,64 @@ func (rb *RingBuffer) init(size uint64) {
 	rb.mask = size - 1 // so we don't have to do this with every put/get operation
 }
 
-// Put adds the provided item to the queue.  If the queue is full, this
-// call will block until an item is added to the queue or Dispose is called
-// on the queue.  An error will be returned if the queue is disposed.
+// Put adds the provided item to the tail.  If the tail is full, this
+// call will block until an item is added to the tail or Dispose is called
+// on the tail.  An error will be returned if the tail is disposed.
 func (rb *RingBuffer) Put(item interface{}) error {
 	_, err := rb.put(item, false)
 	return err
 }
 
-// Offer adds the provided item to the queue if there is space.  If the queue
+// Offer adds the provided item to the tail if there is space.  If the tail
 // is full, this call will return false.  An error will be returned if the
-// queue is disposed.
+// tail is disposed.
 func (rb *RingBuffer) Offer(item interface{}) (bool, error) {
 	return rb.put(item, true)
 }
 
+// 入队函数
+// 	1. 获取插入的位置 pos = rb.tail
+//	2. 获取 pos 处的 buffer node, 即 n = &rb.nodes[pos&rb.mask]
+//	3. 判断 pos 是否等于 n.position
+//		3.1 若相等，尝试占领 pos 这个位置（cas），让 rb.tail 加一，跳出循环
+//		3.2 若 n.position < rb.tail, 出错，panic
+//		3.3 若 n.position > rb.tail, 说明 n 处已经被写入数据，更新 pos , 重新进入第2步
+//  4. 调用 atomic.StoreUint64(&n.position, tail+1) 将 n.position 置为 tail+1
+//
+//
+//
+// 疑问
+//  为何要通过 atomic.StoreUint64(&n.position, tail+1) 将 node 的 position 设为 pos+1 ？
+//
+// 个人见解
+// 	主要作用是标记 pos 处已经放置数据了。
+// 	若其他线程获得相同的 pos ，当其再比较 pos 和 sequence 时将不会再相等，就不会再次在相同的 pos 处写入数据。
+// 	另外，此处的 pos+1 和出队时的判断 dif := seq - (pos + 1) 相对应。
+//
 func (rb *RingBuffer) put(item interface{}, offer bool) (bool, error) {
 	var n *node
-	pos := atomic.LoadUint64(&rb.queue)
+	tail := atomic.LoadUint64(&rb.tail)
 L:
 	for {
+
+		// 是否 disposed
 		if atomic.LoadUint64(&rb.disposed) == 1 {
 			return false, ErrDisposed
 		}
 
-		n = &rb.nodes[pos&rb.mask]
-		seq := atomic.LoadUint64(&n.position)
-		switch dif := seq - pos; {
-		case dif == 0:
-			if atomic.CompareAndSwapUint64(&rb.queue, pos, pos+1) {
+		// 取队尾节点，用于放置新数据 item
+		n = &rb.nodes[tail&rb.mask]
+		pos := atomic.LoadUint64(&n.position)
+		switch diff := pos - tail; {
+		case diff == 0:
+			// cas 成功，则跳出循环，否则继续循环
+			if atomic.CompareAndSwapUint64(&rb.tail, tail, tail+1) {
 				break L
 			}
-		case dif < 0:
+		case diff < 0:
 			panic(`Ring buffer in a compromised state during a put operation.`)
 		default:
-			pos = atomic.LoadUint64(&rb.queue)
+			tail = atomic.LoadUint64(&rb.tail)
 		}
 
 		if offer {
@@ -114,32 +137,45 @@ L:
 	}
 
 	n.data = item
-	atomic.StoreUint64(&n.position, pos+1)
+	atomic.StoreUint64(&n.position, tail+1)
 	return true, nil
 }
 
-// Get will return the next item in the queue.  This call will block
-// if the queue is empty.  This call will unblock when an item is added
-// to the queue or Dispose is called on the queue.  An error will be returned
-// if the queue is disposed.
+// Get will return the next item in the tail.  This call will block
+// if the tail is empty.  This call will unblock when an item is added
+// to the tail or Dispose is called on the tail.  An error will be returned
+// if the tail is disposed.
 func (rb *RingBuffer) Get() (interface{}, error) {
 	return rb.Poll(0)
 }
 
-// Poll will return the next item in the queue.  This call will block
-// if the queue is empty.  This call will unblock when an item is added
-// to the queue, Dispose is called on the queue, or the timeout is reached. An
-// error will be returned if the queue is disposed or a timeout occurs. A
+// Poll will return the next item in the tail.  This call will block
+// if the tail is empty.  This call will unblock when an item is added
+// to the tail, Dispose is called on the tail, or the timeout is reached. An
+// error will be returned if the tail is disposed or a timeout occurs. A
 // non-positive timeout will block indefinitely.
+//
+//
+//
+// 1. 获取出队位置 pos = rb.head
+// 2. 获取 pos 处的 node
+// 3. 判断 pos + 1 是否等于 node.position
+//	3.1 若相等，则 node 上包含数据，尝试弹出 pos 这个位置（case ），让 rb.head 加一，跳出循环
+// 	3.2 若 node.position < pos + 1 , 出错，panic
+//  3.3 若 node.position > pos + 1 , 说明 pos 处数据已经出队，更新 pos , 重新进入第2步
+//
 func (rb *RingBuffer) Poll(timeout time.Duration) (interface{}, error) {
+
 	var (
 		n     *node
-		pos   = atomic.LoadUint64(&rb.dequeue)
+		pos   = atomic.LoadUint64(&rb.head)
 		start time.Time
 	)
+
 	if timeout > 0 {
 		start = time.Now()
 	}
+
 L:
 	for {
 		if atomic.LoadUint64(&rb.disposed) == 1 {
@@ -150,13 +186,13 @@ L:
 		seq := atomic.LoadUint64(&n.position)
 		switch dif := seq - (pos + 1); {
 		case dif == 0:
-			if atomic.CompareAndSwapUint64(&rb.dequeue, pos, pos+1) {
+			if atomic.CompareAndSwapUint64(&rb.head, pos, pos+1) {
 				break L
 			}
 		case dif < 0:
 			panic(`Ring buffer in compromised state during a get operation.`)
 		default:
-			pos = atomic.LoadUint64(&rb.dequeue)
+			pos = atomic.LoadUint64(&rb.head)
 		}
 
 		if timeout > 0 && time.Since(start) >= timeout {
@@ -171,9 +207,9 @@ L:
 	return data, nil
 }
 
-// Len returns the number of items in the queue.
+// Len returns the number of items in the tail.
 func (rb *RingBuffer) Len() uint64 {
-	return atomic.LoadUint64(&rb.queue) - atomic.LoadUint64(&rb.dequeue)
+	return atomic.LoadUint64(&rb.tail) - atomic.LoadUint64(&rb.head)
 }
 
 // Cap returns the capacity of this ring buffer.
@@ -181,14 +217,14 @@ func (rb *RingBuffer) Cap() uint64 {
 	return uint64(len(rb.nodes))
 }
 
-// Dispose will dispose of this queue and free any blocked threads
+// Dispose will dispose of this tail and free any blocked threads
 // in the Put and/or Get methods.  Calling those methods on a disposed
-// queue will return an error.
+// tail will return an error.
 func (rb *RingBuffer) Dispose() {
 	atomic.CompareAndSwapUint64(&rb.disposed, 0, 1)
 }
 
-// IsDisposed will return a bool indicating if this queue has been
+// IsDisposed will return a bool indicating if this tail has been
 // disposed.
 func (rb *RingBuffer) IsDisposed() bool {
 	return atomic.LoadUint64(&rb.disposed) == 1
